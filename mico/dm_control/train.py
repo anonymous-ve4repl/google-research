@@ -30,6 +30,7 @@ from flax.metrics import tensorboard
 from gym import spaces
 from mico.dm_control import dbc_agent
 from mico.dm_control import metric_sac_agent
+from mico.dm_control import ve_sac_agent
 
 flags.DEFINE_string('base_dir', None,
                     'Base directory to host all required sub-directories.')
@@ -82,6 +83,17 @@ def create_continuous_bisim_agent(
         action_dtype=environment.action_space.dtype,
         observation_dtype=environment.observation_space.dtype,
         summary_writer=summary_writer)
+  elif FLAGS.agent_name.startswith('ve'):
+    assert isinstance(environment.action_space, spaces.Box)
+    assert isinstance(environment.observation_space, spaces.Box)
+    return ve_sac_agent.VESACAgent(
+        action_shape=environment.action_space.shape,
+        action_limits=(environment.action_space.low,
+                       environment.action_space.high),
+        observation_shape=environment.observation_space.shape,
+        action_dtype=environment.action_space.dtype,
+        observation_dtype=environment.observation_space.dtype,
+        summary_writer=summary_writer)
   else:
     raise ValueError(f'Unknown agent: {FLAGS.agent_name}')
 
@@ -97,13 +109,13 @@ def main(unused_argv):
   base_dir = FLAGS.base_dir
   gin_files = FLAGS.gin_files
   gin_bindings = FLAGS.gin_bindings
-  xm_xid = None if 'xm_xid' not in FLAGS else FLAGS.xm_xid
-  xm_wid = None if 'xm_wid' not in FLAGS else FLAGS.xm_wid
-  xm_parameters = (
-      None if 'xm_parameters' not in FLAGS else FLAGS.xm_parameters)
-  base_dir, gin_files, gin_bindings = xm_utils.run_xm_preprocessing(
-      xm_xid, xm_wid, xm_parameters, base_dir,
-      FLAGS.custom_base_dir_from_hparams, gin_files, gin_bindings)
+  # xm_xid = None if 'xm_xid' not in FLAGS else FLAGS.xm_xid
+  # xm_wid = None if 'xm_wid' not in FLAGS else FLAGS.xm_wid
+  # xm_parameters = (
+  #     None if 'xm_parameters' not in FLAGS else FLAGS.xm_parameters)
+  # base_dir, gin_files, gin_bindings = utils.run_xm_preprocessing(
+  #     xm_xid, xm_wid, xm_parameters, base_dir,
+  #     FLAGS.custom_base_dir_from_hparams, gin_files, gin_bindings)
   run_experiment.load_gin_configs(gin_files, gin_bindings)
   runner = run_experiment.ContinuousTrainRunner(base_dir,
                                                 create_continuous_bisim_agent)

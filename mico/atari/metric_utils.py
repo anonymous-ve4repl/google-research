@@ -118,3 +118,17 @@ def target_distances(representations, rewards, distance_fn, cumulative_gamma):
   return (
       jax.lax.stop_gradient(
           reward_diffs + cumulative_gamma * next_state_similarities))
+
+@gin.configurable
+def target_distances_ve(representations, v, distance_fn, cumulative_gamma):
+  """Target distance using the metric operator."""
+  squared_v = squarify(v)
+  squared_v_transp = jnp.transpose(squared_v)
+  squared_v = squared_v.reshape((squared_v.shape[0]**2))
+  squared_v_transp = squared_v_transp.reshape(
+      (squared_v_transp.shape[0]**2))
+  v_diffs = jnp.abs(squared_v - squared_v_transp)
+  return (
+      jax.lax.stop_gradient(
+          v_diffs)
+  )
