@@ -31,6 +31,7 @@ from gym import spaces
 from mico.dm_control import dbc_agent
 from mico.dm_control import metric_sac_agent
 from mico.dm_control import ve_sac_agent
+from mico.dm_control import vemetric_sac_agent
 
 flags.DEFINE_string('base_dir', None,
                     'Base directory to host all required sub-directories.')
@@ -76,6 +77,17 @@ def create_continuous_bisim_agent(
     assert isinstance(environment.action_space, spaces.Box)
     assert isinstance(environment.observation_space, spaces.Box)
     return metric_sac_agent.MetricSACAgent(
+        action_shape=environment.action_space.shape,
+        action_limits=(environment.action_space.low,
+                       environment.action_space.high),
+        observation_shape=environment.observation_space.shape,
+        action_dtype=environment.action_space.dtype,
+        observation_dtype=environment.observation_space.dtype,
+        summary_writer=summary_writer)
+  elif FLAGS.agent_name.startswith('vemico'):
+    assert isinstance(environment.action_space, spaces.Box)
+    assert isinstance(environment.observation_space, spaces.Box)
+    return vemetric_sac_agent.VEMetricSACAgent(
         action_shape=environment.action_space.shape,
         action_limits=(environment.action_space.low,
                        environment.action_space.high),

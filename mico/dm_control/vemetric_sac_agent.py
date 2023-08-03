@@ -41,6 +41,7 @@ from mico.atari import metric_utils
 
 import copy
 
+
 SacCriticOutput = collections.namedtuple(
     'sac_critic_output', ['q_value1', 'q_value2', 'representation'])
 SacOutput = collections.namedtuple('sac_output',
@@ -74,6 +75,11 @@ class SACConvNetwork(nn.Module):
 
     return SacOutput(actor_output, critic_output, encoding.critic_z)
 
+  def critic_encoding(self, state):
+    """Calls the SAC critic network."""
+    encoding = self._encoder(state)
+    return encoding.critic_z
+
   def actor(self, state,
             key):
     """Calls the SAC actor network."""
@@ -87,9 +93,21 @@ class SACConvNetwork(nn.Module):
     return SacCriticOutput(critic_out.q_value1, critic_out.q_value2,
                            encoding.critic_z)
 
+  def encoded_critic(self, encoding, action):
+    """Calls the SAC critic network."""
+    critic_out = self._sac_network.critic(encoding, action)
+    return SacCriticOutput(critic_out.q_value1, critic_out.q_value2,
+                           encoding)
 
-def l1(x, y):
-  return jnp.sum(abs(x - y))
+  def encoded_next_critic(self, encoding_critic, encoding_actor):
+    """Calls the SAC critic network."""
+    actor_output = self._sac_network.actor(encoding_action_actor, key)
+    action = actor_output.mean_action if mean_action else actor_output.sampled_action
+    critic_output = self._sac_network.critic(encoding.critic_z, action)
+    critic_out = self._sac_network.critic(encoding, action)
+    return SacCriticOutput(critic_out.q_value1, critic_out.q_value2,
+                           encoding)
+
 
 @functools.partial(jax.jit, static_argnums=(0, 1, 2))
 def train(network_def,
@@ -117,12 +135,19 @@ def train(network_def,
   batch_size = states.shape[0]
   actions = jnp.reshape(actions, (batch_size, -1))  # Flatten
 
-  rng1, rng2 = jax.random.split(key, num=2)
+  rng1, rng2, rng3 = jax.random.split(key, num=3)
 
   def loss_fn(
       params,
       log_alpha):
     """Calculates the loss for one transition."""
+
+    def encoding_online(state):
+      return network_def.apply(params, state, method=network_def.critic_encoding)
+
+    def encoding_target(state):
+      return network_def.apply(frozen_params, state, method=network_def.critic_encoding)
+
     def critic_online(state, action):
       return network_def.apply(params, state, action, method=network_def.critic)
 
@@ -134,6 +159,9 @@ def train(network_def,
 
     def actor_online(state, action):
       return network_def.apply(params, state, action, method=network_def.actor)
+
+    def frozen_actor(state, key):
+      return network_def.apply(frozen_params, state, key, method=network_def.actor)
 
     def q_target(next_state, rng):
       return network_def.apply(target_params, next_state, rng, True)
@@ -181,37 +209,27 @@ def train(network_def,
     entropy_diffs = -action_log_probs - target_entropy
     alpha_loss = jnp.mean(log_alpha * jax.lax.stop_gradient(entropy_diffs))
 
-    # VE loss.
+    # VE+MICo loss.
     distance_fn = metric_utils.cosine_distance
-    online_dist = metric_utils.representation_distances(
-        representations, target_r, distance_fn)
 
+    brng3 = jnp.stack(jax.random.split(rng3, num=batch_size))
+    encoding = jax.vmap(encoding_online)(states)
+    # Next action is mean action, as calculated in q target
+    next_actions, _, _ = jax.vmap(frozen_actor)(next_states, brng3)
     ve_dist = 0.0
     num_scaffolds = len(scaffold_params)
-    for i in range(num_scaffolds):
-      local_param = scaffold_params[i]
 
-      def local_critic(state, action):
-        return network_def.apply(local_param, state, action, method=network_def.critic)
-
-      # ToDo: Get r + Q(s',a') instead of Q(s,a)?
-      Q1, Q2, r = jax.vmap(local_critic)(states, actions)
-      Q = (Q1 + Q2)/2
-
-      Q = Q.reshape((Q.shape[0]))
-
-      ve_dist_ = metric_utils.target_distances_ve(
-        target_next_r, Q, distance_fn, cumulative_gamma)
-      ve_dist += ve_dist_
-
-    ve_dist = ve_dist / num_scaffolds
-    ve_loss = jnp.mean(jax.vmap(losses.huber_loss)(online_dist, ve_dist))
+    online_dist = metric_utils.representation_distances_vemico(network_def,
+        representations, target_r, actions, scaffold_params, distance_fn)
+    target_dist = metric_utils.target_distances_vemico(
+      network_def, target_next_r, rewards, next_actions, scaffold_params, distance_fn, cumulative_gamma)
+    vemico_loss = jnp.mean(jax.vmap(losses.huber_loss)(online_dist, target_dist))
 
     # Giving a smaller weight to the critic empirically gives better results
     sac_loss = 0.5 * critic_loss + 1.0 * policy_loss + 1.0 * alpha_loss
-    combined_loss = (1. - mico_weight) * sac_loss + mico_weight * ve_loss
+    combined_loss = (1. - mico_weight) * sac_loss + mico_weight * vemico_loss
     return combined_loss, {
-        've_loss': ve_loss,
+        'vemico_loss': vemico_loss,
         'critic_loss': critic_loss,
         'policy_loss': policy_loss,
         'alpha_loss': alpha_loss,
@@ -242,7 +260,7 @@ def train(network_def,
       'log_alpha': log_alpha,
       'optimizer_state': optimizer_state,
       'alpha_optimizer_state': alpha_optimizer_state,
-      'Losses/Mico': aux_vars['ve_loss'],
+      'Losses/veMico': aux_vars['vemico_loss'],
       'Losses/Critic': aux_vars['critic_loss'],
       'Losses/Actor': aux_vars['policy_loss'],
       'Losses/Alpha': aux_vars['alpha_loss'],
@@ -258,25 +276,24 @@ def train(network_def,
 
 
 @gin.configurable
-class VESACAgent(sac_agent.SACAgent):
+class VEMetricSACAgent(sac_agent.SACAgent):
   """A JAX implementation of SAC with MICo."""
 
   def __init__(self,
                action_shape,
                action_limits,
                observation_shape,
-               num_scaffolds = 8,
+               num_scaffolds = 4,
                mico_weight=1e-5,
                action_dtype=jnp.float32,
                observation_dtype=jnp.float32,
                summary_writer=None):
     assert isinstance(observation_shape, tuple)
-    logging.info('Creating VESACAgent')
+    logging.info('Creating VEMetricSACAgent')
     self._mico_weight = mico_weight
     super().__init__(action_shape, action_limits, observation_shape,
                      action_dtype, observation_dtype, network=SACConvNetwork,
                      summary_writer=summary_writer)
-
     # VE: Scaffold
     self.scaffold_params = [self.target_params for i in range(num_scaffolds)]
     self.latest_scaffold = 0
@@ -288,6 +305,7 @@ class VESACAgent(sac_agent.SACAgent):
         self._sample_from_replay_buffer()
         self._rng, key = jax.random.split(self._rng)
 
+        print("TRAIN")
         train_returns = train(
             self.network_def,
             self.network_optimizer,
@@ -320,7 +338,6 @@ class VESACAgent(sac_agent.SACAgent):
                                          self.training_steps)
           self.summary_writer.flush()
         self._maybe_sync_weights()
-
         # VE: Add to scaffold
         self.scaffold_params[self.latest_scaffold] = copy.deepcopy(self.target_params)
         self.latest_scaffold = (self.latest_scaffold + 1) % (len(self.scaffold_params))

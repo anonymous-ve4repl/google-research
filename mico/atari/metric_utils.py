@@ -132,3 +132,86 @@ def target_distances_ve(representations, v, distance_fn, cumulative_gamma):
       jax.lax.stop_gradient(
           v_diffs)
   )
+
+@gin.configurable
+def target_distances_vemico(network_def, representations, rewards, actions, scaffold_params, distance_fn, cumulative_gamma):
+  """Target distance using the metric operator."""
+  next_state_similarities = representation_distances_vemico(
+    network_def, representations, representations, actions, scaffold_params, distance_fn)
+  squared_rews = squarify(rewards)
+  squared_rews_transp = jnp.transpose(squared_rews)
+  squared_rews = squared_rews.reshape((squared_rews.shape[0]**2))
+  squared_rews_transp = squared_rews_transp.reshape(
+      (squared_rews_transp.shape[0]**2))
+  reward_diffs = absolute_reward_diff(squared_rews, squared_rews_transp)
+  return (
+      jax.lax.stop_gradient(
+          reward_diffs + cumulative_gamma * next_state_similarities))
+
+@gin.configurable
+def representation_distances_vemico(network_def, first_representations, second_representations,
+                                    actions, scaffold_params,
+                             distance_fn, beta=0.1,
+                             return_distance_components=False):
+  """Compute distances between representations.
+
+  This will compute the distances between two representations.
+
+  Args:
+    first_representations: first set of representations to use.
+    second_representations: second set of representations to use.
+    distance_fn: function to use for computing representation distances.
+    beta: float, weight given to cosine distance between representations.
+    return_distance_components: bool, whether to return the components used for
+      computing the distance.
+
+  Returns:
+    The distances between representations, combining the average of the norm of
+    the representations and the distance given by distance_fn.
+  """
+  batch_size = first_representations.shape[0]
+  representation_dim = first_representations.shape[-1]
+  action_dim = actions.shape[-1]
+  first_squared_reps = squarify(first_representations)
+  first_squared_reps = jnp.reshape(first_squared_reps ,
+                                   [batch_size**2, representation_dim])
+  first_actions = squarify(actions)
+  first_actions = jnp.reshape(first_actions, [batch_size**2, action_dim])
+
+  second_squared_reps = squarify(second_representations)
+  second_squared_reps = jnp.transpose(second_squared_reps, axes=[1, 0, 2])
+  second_squared_reps = jnp.reshape(second_squared_reps,
+                                    [batch_size**2, representation_dim])
+
+  second_actions = squarify(actions)
+  second_actions = jnp.transpose(second_actions, axes=[1,0,2])
+  second_actions = jnp.reshape(second_actions, [batch_size**2, action_dim])
+
+  # base_distances = jax.vmap(distance_fn, in_axes=(0, 0))(first_squared_reps,
+  #                                                        second_squared_reps)
+
+  base_ve_distances = 0.0
+  num_scaffolds = len(scaffold_params)
+  for i in range(num_scaffolds):
+    local_param = scaffold_params[i]
+
+    def local_encoded_critic(state, action):
+      return network_def.apply(local_param, state, action, method=network_def.encoded_critic)
+
+    Q1, Q2, r = jax.vmap(local_encoded_critic)(first_squared_reps, first_actions)
+    first_Q = (Q1 + Q2)/2
+    first_Q = first_Q.reshape((first_Q.shape[0]))
+    Q1, Q2, r = jax.vmap(local_encoded_critic)(second_squared_reps, second_actions)
+    second_Q = (Q1 + Q2)/2
+    second_Q = second_Q.reshape((second_Q.shape[0]))
+
+    v_diffs = jnp.abs(first_Q - second_Q)
+    base_ve_distances += v_diffs
+
+  base_distances = base_ve_distances / num_scaffolds
+
+  norm_average = 0.5 * (jnp.sum(jnp.square(first_squared_reps), -1) +
+                        jnp.sum(jnp.square(second_squared_reps), -1))
+  if return_distance_components:
+    return norm_average + beta * base_distances, norm_average, base_distances
+  return norm_average + beta * base_distances

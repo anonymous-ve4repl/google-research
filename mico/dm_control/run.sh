@@ -29,7 +29,7 @@ set -x
 python3 -m mico.dm_control.train \
   --base_dir=temp2 \
   --gin_files=mico/dm_control/configs/ve.gin \
-  --agent_name "ve" \
+  --agent_name "vemico" \
   # --gin_bindings="JaxImplicitQuantileAgent.min_replay_history=100" \
   # --gin_bindings="create_metric_agent.agent_name='metric_implicit_quantile'" \
   # --gin_bindings="MetricImplicitQuantileAgent.tau=0.03"
